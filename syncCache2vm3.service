@@ -1,0 +1,37 @@
+#
+# For vm3
+#
+# The service script for running syncGMC.py
+# which syncs /var/opt/gmc to remote hosts
+#
+# copy this file to /etc/systemd/system
+#
+# sudo cp syncGMC2vm3.service /etc/systemd/system/
+#
+# March-2019, Pat Welch, pat@mousebrains.com
+
+[Unit]
+Description=Sync /var/opt/gmc to glidervm3.coas.oregonstate.edu:
+
+[Service]
+# Type=simple # Default
+User=pat
+Group=pat
+SupplementaryGroups=localuser
+WorkingDirectory=/home/pat/logs
+#
+# See /home/pat/.ssh/config for where vm3 points to and which identity file it uses
+#
+ExecStart=/home/pat/bin/syncCache.py \
+	--src=osu \
+	--src=default \
+	--src=vietnam \
+	--tgt=vm3:from-glider \
+	--log=/home/pat/logs/cache.log \
+	--verbosity=INFO \
+	--mailTo=pat@mousebrains.com
+RestartSec=60
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

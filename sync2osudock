@@ -1,0 +1,46 @@
+#! /bin/bash
+#
+# To be run as a service
+
+USAGE="Usage: $0 SOURCE_DIRECTORY RSYNC_TARGET LOGFILE"
+
+if [ "$#" -ne 3 ]; then # Must have three arguments
+  echo $USAGE >&2
+  exit 1
+fi
+
+DIR="$1"
+TGT="$2"
+LOG="$3"
+
+RSYNC=/usr/bin/rsync
+OPTS="--archive --verbose --chmod=Fu=rw,Fgo=r"
+
+if ! [ -d "$DIR" ]; then # Must be a directory
+  echo "$DIR is not a directory" >&2
+  echo $USAGE >&2
+  exit 1
+fi
+
+function myDoit() {
+# Make sure we are synced before starting
+echo 
+echo DATE: `date` $DIR $TGT
+$RSYNC $OPTS "$DIR" "$TGT"
+
+while inotifywait \
+	--quiet --quiet \
+	--event close_write \
+	--event move \
+	--event delete \
+	--event attrib \
+	"$DIR"
+do
+  # Something changed, so sync again
+  echo
+  echo DATE: `date` $DIR $TGT
+  $RSYNC $OPTS "$DIR" "$TGT"
+done
+} 2>&1 >>$LOG
+
+myDoit

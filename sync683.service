@@ -1,0 +1,33 @@
+#
+# For osudock 683
+#
+# The service script for running sync2osudock.py
+# which syncs /var/opt/gmc/osu/gliders/osu683/to-glider to remote hosts
+#
+# copy this file to /etc/systemd/system
+#
+# sudo cp sync683.service /etc/systemd/system/
+#
+# June-2019, Pat Welch, pat@mousebrains.com
+
+[Unit]
+Description=Sync /var/opt/gmc/osu/gliders/osu683/to-glider to osudock:/var/opt/gmc/osu683/to-glider
+
+[Service]
+# Type=simple # Default
+User=pat
+Group=pat
+SupplementaryGroups=localuser
+WorkingDirectory=/home/pat/logs
+#
+# See /home/pat/.ssh/config for where fs2 points to and which identity file it uses
+#
+ExecStart=/home/pat/bin/sync2osudock \
+	/var/opt/gmc/osu/gliders/osu683/to-glider \
+	osudock:/var/opt/gmc/gliders/osu683 \
+	/home/pat/logs/683.log
+RestartSec=600
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
