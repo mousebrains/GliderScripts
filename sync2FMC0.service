@@ -1,0 +1,39 @@
+#
+# For copies goto_l30.ma files from glidervm3 to gliderfmc0
+#
+# The service script for running sync2SFMC.py
+# which syncs src files, goto_l30.ma, to remote targets on gliderfmc0
+#
+# sudo cp sync2FMC0.service /etc/systemd/system/
+#
+# sudo systemctl daemon-reload
+# sudo systemctl enable sync2FMC0.service
+# sudo systemctl start sync2FMC0.service
+#
+# March-2019, Pat Welch, pat@mousebrains.com
+
+[Unit]
+Description=Sync goto files to a dockserver
+
+[Service]
+# Type=simple # Default
+User=pat
+Group=pat
+WorkingDirectory=/home/pat/logs
+#
+# See ~/.ssh/config for where fmc0 points to and which identity file it uses
+#
+
+ExecStart=/home/pat/bin/sync2SFMC.py \
+	--src=/home/pat/to-glider \
+        --fn=goto_l30.ma \
+	--archive=/home/pat/archive \
+	--tgt=fmc0:/var/opt/gmc/osu/gliders \
+	--log=/home/pat/logs/fmc0.log \
+	--verbosity=INFO \
+	--mailTo=XXX@gmail.com
+RestartSec=60
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

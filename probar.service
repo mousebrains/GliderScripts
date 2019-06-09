@@ -1,0 +1,44 @@
+#
+# Copy sbd and tbd files into a from-glider tree when a goto_l30.ma
+# file is added into a to-glider directory.
+#
+# sudo cp probar.service /etc/systemd/system/
+#
+# sudo systemctl daemon-reload
+# sudo systemctl enable probar.service
+# sudo systemctl start probar.service
+#
+# March-2019, Pat Welch, pat@mousebrains.com
+
+[Unit]
+Description=Simulate glider callins
+
+[Service]
+# Type=simple # Default
+User=pat
+Group=pat
+WorkingDirectory=/home/pat/probar/logs
+#
+ExecStart=/home/pat/bin/probar.py \
+	--historical=/home/pat/probar/historical \
+        --src=/home/pat/tgt \
+	--toGlider=/home/pat/from-glider \
+        --fn=goto_l30.ma \
+	--verbosity=DEBUG \
+	--log=/home/pat/logs/probar.log \
+	--gliders=osu683 \
+	--gliders=osu684 \
+	--delayInit 3 \
+	--delayInitSigma=4 \
+	--delayDive=3 \
+	--delayDiveSigma=2 \
+	--delayPostMA=4 \
+	--delayPostMASigma=2 \
+	--delayIntra=10 \
+	--delayIntraSigma=4
+RestartSec=60
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+
