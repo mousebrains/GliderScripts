@@ -1,0 +1,50 @@
+#! /bin/bash
+#
+# Watch a directory for updates
+
+USAGE="Usage: $0 SOURCE_DIRECTORY RSYNC_TARGET LOGFILE"
+
+if [ "$#" -ne 3 ]; then # Must have three arguments
+  echo $USAGE >&2
+  exit 1
+fi
+
+DIR="$1"
+TGT="$2"
+LOG="$3"
+
+RSYNC=/usr/bin/rsync
+OPTS="--archive --verbose"
+
+if ! [ -d "$DIR" ]; then # Must be a directory
+  echo "$DIR is not a directory" >&2
+  echo $USAGE >&2
+  exit 1
+fi
+
+if [ $(pgrep -fo "$0 $DIR $TGT") -ne $$ ] ; then # Oldest one is not me
+  exit 1
+fi
+
+function myDoit() {
+# Make sure we are synced before starting
+echo 
+echo DATE: `date` $DIR $TGT
+$RSYNC $OPTS "$DIR" "$TGT"
+
+while inotifywait \
+	--quiet --quiet \
+	--event close_write \
+	--event move \
+	--event delete \
+	--event attrib \
+	"$DIR"
+do
+  # Something changed, so sync again
+  echo
+  echo DATE: `date` $DIR $TGT
+  $RSYNC $OPTS "$DIR" "$TGT"
+done
+} 2>&1 >>$LOG
+
+myDoit

@@ -16,3 +16,5 @@ This set syncs from non-SFMC machines to SFMC machines:
 2) sync2FMC0.service.* are examples of services scripts using sync2SFMC.py
 3) probar.py is a reactive test script for the SAS experiment. It writes an sbd/tbd into a directory then monitors a directory for new goto files. When a goto file is found the next sbd/tbd files are distributed, ...
 4) probar.service is an example service using probar.py
+
+5) syncToFMC0 syncs from a legacy dockserver running on CentOS6, without services to an SFMC system 
