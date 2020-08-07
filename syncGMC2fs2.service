@@ -1,8 +1,8 @@
 #
-# For fs2
+# For gliderfs2
 #
 # The service script for running syncGMC.py
-# which syncs /var/opt/gmc to remote hosts
+# which syncs /var/opt/sfmc-dockserver/stations to a remote
 #
 # copy this file to /etc/systemd/system
 #
@@ -11,7 +11,7 @@
 # March-2019, Pat Welch, pat@mousebrains.com
 
 [Unit]
-Description=Sync /var/opt/gmc to gliderfs2.coas.oregonstate.edu:/data/Dockserver/gliderfmc0
+Description=Sync /var/opt/sfmc-dockserver/stations to gliderfs2:/data/Dockserver/gliderfmc0
 
 [Service]
 # Type=simple # Default
@@ -23,13 +23,12 @@ WorkingDirectory=/home/pat/logs
 # See /home/pat/.ssh/config for where fs2 points to and which identity file it uses
 #
 ExecStart=/home/pat/bin/syncGMC.py \
-	--gmcRoot=/var/opt/gmc \
-	--tgt=fs2:/data/Dockserver/gliderfmc0 \
-	--log=/home/pat/logs/fs2.log \
-	--verbosity=DEBUG \
-	--mailTo=pat@mousebrains.com 
+	--target=fs2:/data/Dockserver/gliderfmc0 \
+	--logfile=/home/pat/logs/fs2.log \
+	/var/opt/sfmc-dockserver/stations
 	# --mailTo=aerofeev@coas.oregonstate.edu
-RestartSec=60
+	# --mailTo=pat@mousebrains.com 
+RestartSec=300
 Restart=always
 
 [Install]
