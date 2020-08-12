@@ -75,7 +75,6 @@ class Sync(threading.Thread):
 
     def __timedout(self) -> bool:
         logger = self.logger
-        logger.info("Timed out")
         cmd = [args.rsync,
                 "--archive",
                 "--delete",
@@ -87,7 +86,6 @@ class Sync(threading.Thread):
         logger.debug("cmd=%s", cmd)
         if self.args.dryrun: return True
         p = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        logger.info("run %s", p)
         if p.returncode == 0: # Success
             logger.info("Synced %s to %s", self.__stack, args.target)
             return True
