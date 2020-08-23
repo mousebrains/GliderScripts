@@ -1,177 +1,124 @@
 #! /usr/bin/env python3
 #
-# This is designed to handle TWR's dockserver, both legacy and SFMC with projects.
-# It recursively monitors gmcRoot, typically /var/opt/gmc for legacy servers and
-# /var/opt/sfmc-dockserver on SFMC.
-# Anytime a low level directory matching one of the src directories,
-# typically from-glider and logs,
-# that directory will be synced to the target.
-# It is assumed the directory structure is something like:
-# /var/opt/sfmc-dockserver/stations/*/gliders/from-glider
-# which works with both the legacy and SFMC versions of the dockserver
+# This script is designed to handle TWR's dockerserver, both legacy and SFMC with projects.
 #
-# N.B. The service has a supplemental group, localuser, which can 
-# access the directory /var/opt/sfmc-dockserver
+# It recursively monitors gmcRoot, typically 
+#    /var/opt/gmc for the legacy dockserver and
+#    /var/opt/sfmc-dockserver/stations for SFMC.
+#
+# Anytime a low level directory, matching one of the src directories,
+# typically from-glider and logs, is updated, the tree is synced to 
+# to the target, with the project removed is it exists.
+#
+# N.B. The service has a supplemental group, localuser, which can
+#      access the directory /var/opt/sfmc-dockserver
 #
 # March-2019, Pat Welch, pat@mousebrains.com
 # Aug-2020, Pat Welch, pat@mousebrains.com, modified for SFMC 8.5 structure change
 
-import sys
-import os.path
 import argparse
-import logging
-import MyLogger
-import pyinotify
-import threading
-import queue
-import re
+import os
+import os.path
 import time
-import subprocess
+import queue
+import logging
+import re
+import MyLogger
+import INotify
+from RSync import RSync
 
-class Sync(threading.Thread):
-    def __init__(self, args:argparse.ArgumentParser, logger:logging.Logger) -> None:
-        threading.Thread.__init__(self, daemon=True)
-        self.name = "SYNC"
-        self.args = args
-        self.logger = logger
-        self.__queue = queue.Queue()
-        self.__exclude = self.__mkRegExp(
-                [r"/.archived-deployments/"] if args.exclude is None else args.exclude)
-        self.__sources = self.__mkRegExp(
-                [r"/.*/gliders/[^/]+/"] if args.source is None else args.source)
-        self.__stack = set()
+def mkPath(path:str, args:argparse.ArgumentParser) -> str:
+    trigger = re.compile("(.*)(" + "|".join(args.trigger) + ")")
+    a = trigger.search(path)
+    if a is None: return None
 
-    @staticmethod
-    def addArgs(parser:argparse.ArgumentParser) -> None:
-        grp = parser.add_argument_group(description="Sync related options")
-        grp.add_argument("--exclude", type=str, action="append",
-                help="Directories to exclude")
-        grp.add_argument("--source", type=str, action="append",
-                help="Regular expression to use as sources in rsync")
-        grp.add_argument("--rsync", type=str, default="/usr/bin/rsync", metavar="command",
-                help="rsync command")
-        grp.add_argument("--delay", type=float, default=10, metavar="seconds",
-                help="Delay after a notification before starting rsync")
-        grp.add_argument("--chmod", type=str, default="Do+rx,Fo+r", help="chmod on rsync command")
-        grp.add_argument("--target", type=str, required=True, help="Target of rsync")
-        grp.add_argument("--dryrun", action="store_true", help="Do not actually run rsync")
+    if args.exclude is not None:
+        b = re.search("(" + "|".join(args.exclude) + ")", path)
+        if b is not None:
+            return None
+    return a[1]
 
-    @staticmethod
-    def __mkRegExp(items) -> list:
-        a = []
-        for item in items:
-            a.append(re.compile(item))
-        return a
+def doit(args:argparse.ArgumentParser,
+        logger:logging.Logger,
+        inotify:INotify.INotify,
+        rsync:RSync) -> None:
+    timeout = None
+    paths = set()
 
-    def put(self, fn:str) -> None:
-        self.__queue.put(fn)
+    while inotify.is_alive(): # This should be forever
+        try:
+            dt = None if timeout is None else max(0.001, (timeout - time.time()))
+            evt = inotify.get(timeout=dt)
+            inotify.task_done()
 
-    def __processFile(self, fn:str) -> bool:
-        for item in self.__exclude:
-            if item.search(fn) is not None:
-                self.logger.debug("Excluding %s", fn)
-                return False
-        return True
+            if evt.flags.IGNORED in evt.flags:
+                continue
 
-    def __timedout(self) -> bool:
-        logger = self.logger
-        cmd = [args.rsync,
-                "--archive",
-                "--delete",
-                "--delay-updates",
-                "--chmod=" + args.chmod,
-                ]
-        cmd.extend(list(self.__stack))
-        cmd.append(args.target)
-        logger.debug("cmd=%s", cmd)
-        if self.args.dryrun: return True
-        p = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if p.returncode == 0: # Success
-            logger.info("Synced %s to %s", self.__stack, args.target)
-            return True
-        logger.error("Error syncing %s to %s\n%s", self.__stack, args.target, p.stdout)
-        return False
-        
-    def run(self): # Called on start
-        args = self.args
-        logger = self.logger
-        q = self.__queue
-        sources = self.__sources
-        logger.info("Starting")
-        tRef = None
-        while True:
-            try:
-                fn = q.get(timeout=None if tRef is None else max(0.001, tRef - time.time()))
-                for item in sources:
-                    a = item.search(fn)
-                    if a is None: continue
-                    if self.__processFile(fn):
-                        src = a[0]
-                        self.logger.debug("Going to process %s, %s", fn, src)
-                        if len(self.__stack) == 0:
-                            tRef = time.time() + args.delay
-                        self.__stack.add(src[:-1]) # Strip off trailing slash
-                    break
-                q.task_done()
-            except queue.Empty:
-                try:
-                    self.__timedout()
-                except:
-                    logger.exception("Unexpected Exception")
-                self.__stack = set()
-                tRef = None
-            except:
-                logger.exception("Unexpected Exception")
-                break
+            a = mkPath(evt.path, args)
+            if a is None:
+                continue
 
-class Handler(pyinotify.ProcessEvent):
-    def __init__(self, sync:Sync, logger:logging.Logger) -> None:
-        pyinotify.ProcessEvent.__init__(self)
-        self.__sync = sync
-        self.__logger = logger
+            paths.add(a if os.path.isdir(a) else os.path.dirname(a))
+            if timeout is None:
+                timeout = evt.t + args.delay # Time out in args.delay seconds from now
+        except queue.Empty:
+            rsync.put(paths)
+            paths = set()
+            timeout = None
 
-    def process_default(self, event) -> None:
-        if not self.__sync.is_alive():
-            raise Exception("Sync is not alive for %s", event.pathname)
-        self.__sync.put(event.pathname)
+def initialSync(args:argparse.ArgumentParser, rsync:RSync) -> None:
+    paths = set()
+    trigger = re.compile("(.*)(" + "|".join(args.trigger) + ")")
+    for path in args.dir:
+        for (root, dirs, files) in os.walk(path):
+            for name in dirs:
+                a = mkPath(os.path.join(root, name), args)
+                if a is not None: paths.add(a)
+            for name in files:
+                a = mkPath(os.path.join(root, name), args)
+                if a is not None: paths.add(a)
+    if len(paths):
+        rsync.put(paths)
 
-parser = argparse.ArgumentParser(description="Various Options")
-parser.add_argument("dir", nargs="+", help="Directories to monitor")
-parser.add_argument("--NoInitialSync", action="store_true",
-                help="Should an initial sync be done?")
-Sync.addArgs(parser)
+
+parser = argparse.ArgumentParser(description="Test a simple iNotify interface")
+parser.add_argument("dir", nargs="+", metavar="directory", help="Directories to monitor")
+parser.add_argument("--delay", type=int, default=30, metavar="seconds",
+        help="After a trigger event is received, how long before rsync is initiated")
+parser.add_argument("--trigger", type=str, action="append", required=True, metavar="/from_glider", 
+        help="Directories that initiate an rsync event")
+parser.add_argument("--exclude", type=str, action="append", metavar="/.archived-deployments",
+        help="Directories to ignore updates from")
+parser.add_argument("--noInitial", action="store_true", help="Do not do an initial sync")
 MyLogger.addArgs(parser)
+RSync.addArgs(parser)
 args = parser.parse_args()
 
 logger = MyLogger.mkLogger(args)
 
-sync = Sync(args, logger)
-sync.start()
+rsync = RSync(args, logger)
+rsync.start()
+inotify = INotify.INotify(logger)
+inotify.start()
 
-handler = Handler(sync, logger)
+mask = INotify.Flags( \
+            INotify.Flags.CLOSE_WRITE |
+            INotify.Flags.MOVED_TO |
+            INotify.Flags.MOVED_FROM |
+            INotify.Flags.MOVE_SELF | 
+            INotify.Flags.DELETE |
+            INotify.Flags.DELETE_SELF |
+            INotify.Flags.CREATE) # For directory recursion
 
-wm = pyinotify.WatchManager()
-notifier = pyinotify.Notifier(wm, handler)
+for path in args.dir:
+    inotify.add(path, recursive=True, mask=mask)
 
-for name in args.dir:
-    if not os.path.isdir(name):
-        logger.error("'%s' is not a directory", name)
-        notifier.stop()
-        sys.exit(1)
-    wm.add_watch(name,
-            pyinotify.IN_CLOSE_WRITE |
-            pyinotify.IN_MOVED_FROM |
-            pyinotify.IN_MOVED_TO |
-            pyinotify.IN_MOVE_SELF |
-            pyinotify.IN_DELETE |
-            pyinotify.IN_DELETE_SELF,
-            rec=True)
+if not args.noInitial:
+    initialSync(args, rsync) 
 
-if not args.NoInitialSync:
-    for name in args.dir: # Walk through tree to do the initial sync
-        for (root, dirs, files) in os.walk(name, topdown="False"):
-            for filename in files:
-                fn = os.path.join(root, filename)
-                sync.put(fn)
+try:
+    doit(args, logger, inotify, rsync)
+except:
+    logger.exception("Unexpected exception, waiting for rsync to finish before exiting")
 
-notifier.loop()
+rsync.join() # Wait for rsync tasks to complete

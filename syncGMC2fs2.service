@@ -23,11 +23,19 @@ WorkingDirectory=/home/pat/logs
 # See /home/pat/.ssh/config for where fs2 points to and which identity file it uses
 #
 ExecStart=/home/pat/bin/syncGMC.py \
-	--target=fs2:/data/Dockserver/gliderfmc0 \
+	--rsyncTarget=fs2:/data/Dockserver/gliderfmc0 \
+	--rsyncExclude=.archived-deployments \
+	--exclude=.archived-deployments \
+	--trigger=/archive \
+	--trigger=/configuration \
+	--trigger=/from-glider \
+	--trigger=/to-glider \
+	--trigger=/to-science \
+	--trigger=/gliderState.xml\
 	--logfile=/home/pat/logs/fs2.log \
+	--mailTo=aerofeev@coas.oregonstate.edu \
+	--mailTo=pat@mousebrains.com  \
 	/var/opt/sfmc-dockserver/stations
-	# --mailTo=aerofeev@coas.oregonstate.edu
-	# --mailTo=pat@mousebrains.com 
 RestartSec=300
 Restart=always
 
