@@ -103,4 +103,11 @@ venv.bak/
 # mypy
 .mypy_cache/
 
+# ruff
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
 .*.swp

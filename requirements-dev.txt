@@ -1,0 +1,10 @@
+# Development dependencies for GliderScripts
+#
+# Install with: pip install -r requirements-dev.txt
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Optional: for coverage reporting
+coverage>=7.0.0

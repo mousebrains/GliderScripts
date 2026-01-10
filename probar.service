@@ -1,44 +1,169 @@
 #
-# Copy sbd and tbd files into a from-glider tree when a goto_l30.ma
-# file is added into a to-glider directory.
+# Hardened test service for syncGMC.py
 #
-# sudo cp probar.service /etc/systemd/system/
+# This is a security-hardened version of syncGMC2fs2.service for testing.
+# Compare behavior with the original before replacing.
 #
-# sudo systemctl daemon-reload
-# sudo systemctl enable probar.service
-# sudo systemctl start probar.service
+# Install:
+#   sudo cp probar.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl start probar
 #
-# March-2019, Pat Welch, pat@mousebrains.com
+# Check security score:
+#   systemd-analyze security probar.service
+#
+# View logs:
+#   journalctl -u probar -f
+#
 
 [Unit]
-Description=Simulate glider callins
+Description=Sync /var/opt/sfmc-dockserver/stations to gliderfs2 (hardened test)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-# Type=simple # Default
+Type=simple
 User=pat
 Group=pat
-WorkingDirectory=/home/pat/probar/logs
-#
-ExecStart=/home/pat/bin/probar.py \
-	--historical=/home/pat/probar/historical \
-        --src=/home/pat/tgt \
-	--toGlider=/home/pat/from-glider \
-        --fn=goto_l30.ma \
-	--verbosity=DEBUG \
-	--log=/home/pat/logs/probar.log \
-	--gliders=osu683 \
-	--gliders=osu684 \
-	--delayInit 3 \
-	--delayInitSigma=4 \
-	--delayDive=3 \
-	--delayDiveSigma=2 \
-	--delayPostMA=4 \
-	--delayPostMASigma=2 \
-	--delayIntra=10 \
-	--delayIntraSigma=4
-RestartSec=60
+SupplementaryGroups=localuser
+WorkingDirectory=/home/pat/logs
+
+ExecStart=/home/pat/bin/syncGMC.py \
+	--rsyncTarget=fs2:/data/Dockserver/gliderfmc0 \
+	--rsyncExclude=.archived-deployments \
+	--exclude=.archived-deployments \
+	--trigger=/archive \
+	--trigger=/configuration \
+	--trigger=/from-glider \
+	--trigger=/to-glider \
+	--trigger=/to-science \
+	--trigger=/gliderState.xml \
+	--logfile=/home/pat/logs/fs2.log \
+	--mailTo=aerofeev@coas.oregonstate.edu \
+	--mailTo=pat@mousebrains.com \
+	/var/opt/sfmc-dockserver/stations
+
 Restart=always
+RestartSec=300
+
+# ============================================
+# SECURITY HARDENING
+# ============================================
+
+# --- Filesystem Protection ---
+# Make /usr, /boot, /efi read-only; /etc read-only
+ProtectSystem=strict
+
+# Make /home read-only except for explicitly allowed paths
+ProtectHome=read-only
+
+# Paths the service needs to write to
+ReadWritePaths=/home/pat/logs
+
+# Paths the service needs to read from
+ReadOnlyPaths=/var/opt/sfmc-dockserver/stations
+ReadOnlyPaths=/home/pat/bin
+ReadOnlyPaths=/home/pat/.ssh
+
+# Give service its own /tmp and /var/tmp
+PrivateTmp=true
+
+# Protect kernel interfaces
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectHostname=true
+ProtectClock=true
+ProtectProc=invisible
+
+# --- Process Restrictions ---
+# Prevent gaining new privileges via execve()
+NoNewPrivileges=true
+
+# Hide physical devices (/dev limited to null, zero, random, etc.)
+PrivateDevices=true
+
+# Prevent memory from being both writable and executable
+MemoryDenyWriteExecute=true
+
+# Lock down personality syscall
+LockPersonality=true
+
+# Restrict realtime scheduling
+RestrictRealtime=true
+
+# Restrict SUID/SGID file creation
+RestrictSUIDSGID=true
+
+# Restrict changing kernel execution domain
+RestrictNamespaces=true
+
+# Disallow acquiring new privileges via file capabilities
+SecureBits=no-setuid-fixup-locked noroot-locked no-cap-fixup-locked
+
+# --- Capability Restrictions ---
+# Drop all capabilities (service doesn't need any)
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# --- Network Restrictions ---
+# Allow only IPv4, IPv6, and Unix sockets
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# --- System Call Filtering ---
+# Only allow native architecture
+SystemCallArchitectures=native
+
+# Allow only system calls needed for normal service operation
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallFilter=~@resources
+SystemCallFilter=~@mount
+SystemCallFilter=~@swap
+SystemCallFilter=~@reboot
+SystemCallFilter=~@raw-io
+SystemCallFilter=~@cpu-emulation
+SystemCallFilter=~@debug
+SystemCallFilter=~@obsolete
+
+# Set error for denied syscalls (vs killing the process)
+SystemCallErrorNumber=EPERM
+
+# --- Resource Limits ---
+# Memory limit
+MemoryMax=512M
+MemoryHigh=384M
+
+# Limit number of tasks/threads
+TasksMax=50
+
+# Limit CPU usage
+CPUQuota=50%
+
+# Limit file descriptors
+LimitNOFILE=1024
+
+# Prevent core dumps (could leak sensitive data)
+LimitCORE=0
+
+# --- Sandboxing ---
+# Run with minimal /dev
+PrivateDevices=true
+
+# Don't allow loading user kernel keyring
+ProtectKernelModules=true
+
+# Prevent access to hardware random
+PrivateMounts=true
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=syncGMC-hardened
+
+# Log security denials for debugging
+AuditLogDirectory=/var/log/audit
 
 [Install]
 WantedBy=multi-user.target
-

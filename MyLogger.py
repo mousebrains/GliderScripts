@@ -8,8 +8,14 @@ import logging
 import logging.handlers
 import socket
 import getpass
+from typing import Union
 
-def addArgs(parser:argparse.ArgumentParser) -> None:
+# Default logger name for the application
+DEFAULT_LOGGER_NAME = "GliderScripts"
+
+
+def addArgs(parser: argparse.ArgumentParser) -> None:
+    """Add logging-related command line arguments to the parser."""
     grp = parser.add_argument_group('Logger Related Options')
     grp.add_argument('--logfile', type=str, metavar='filename', help='Name of logfile')
     grp.add_argument('--logBytes', type=int, default=10000000, metavar='length',
@@ -24,8 +30,19 @@ def addArgs(parser:argparse.ArgumentParser) -> None:
     grp.add_argument('--mailSubject', help='Subject of mail',
             default="ERROR: " + socket.gethostname())
 
-def mkLogger(args:argparse.ArgumentParser) -> logging.Logger:
-    logger = logging.getLogger()
+
+def mkLogger(args: argparse.Namespace, name: str = DEFAULT_LOGGER_NAME) -> logging.Logger:
+    """Create and configure a named logger with file/console and optional email handlers.
+
+    Args:
+        args: Parsed command line arguments with logging options
+        name: Logger name (default: 'GliderScripts')
+
+    Returns:
+        Configured Logger instance
+    """
+    logger = logging.getLogger(name)
+    ch: Union[logging.handlers.RotatingFileHandler, logging.StreamHandler, logging.handlers.SMTPHandler]
     if args.logfile:
         ch = logging.handlers.RotatingFileHandler(args.logfile,
                 maxBytes=args.logBytes,
