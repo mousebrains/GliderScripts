@@ -6,7 +6,7 @@ A lightweight Python tool for real-time file synchronization from SFMC dockserve
 
 ## Overview
 
-GliderScripts monitors specified directories on an SFMC (Science File Management System) dockserver and automatically syncs changes to a remote target using rsync. It uses Linux's inotify mechanism for efficient file system monitoring.
+GliderScripts monitors specified directories on an SFMC (Slocum Fleet Mission Control) dockserver and automatically syncs changes to a remote target using rsync. It uses Linux's inotify mechanism for efficient file system monitoring.
 
 ## Features
 
