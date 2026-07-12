@@ -39,8 +39,7 @@ ExecStart=/home/pat/bin/syncGMC.py \
 	--trigger=/to-science \
 	--trigger=/gliderState.xml \
 	--logfile=/home/pat/logs/fs2.log \
-	--mailTo=aerofeev@coas.oregonstate.edu \
-	--mailTo=pat@mousebrains.com \
+	--mailTo=pat.welch@oregonstate.edu \
 	/var/opt/sfmc-dockserver/stations
 
 Restart=always
