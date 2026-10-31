@@ -6,7 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+- `syncGMC2fs2.service` is now hardened with systemd sandboxing (exposure 9.2 → 1.6), replacing the `probar.service` template
+- `--rsyncTarget` for gliderfs2 is relative to an `rrsync -wo` restricted directory, see `INSTALL.md`
+- rsync uses non-interactive ssh (`BatchMode=yes`) and puts `--` before source paths
+- Scripts run as `/usr/bin/python3 -Es`, ignoring `PYTHON*` environment variables and user site-packages
+
+### Fixed
+- `INotify.py` loaded libc without `use_errno`, so failed calls looked like successes
+- Non-UTF-8 filenames no longer kill the INotify thread
+- Files created in a new directory before its watch was added are no longer missed
+- inotify queue overflows trigger a full rescan instead of silently losing events
+- Watches for deleted directories are dropped when the kernel removes them
+- `--trigger`/`--exclude` match whole path components literally, `/archive` no longer matches `/archived-deployments`
+- Sources which fail every retry are kept and retried, instead of being dropped until the next change
+- Only the first failed round in a row is logged as an error, so an outage sends one mail
+- Exit non-zero if the INotify thread dies, so systemd sees a failure
+
 ### Added
+- `--rsyncRetryDelay`, `--rsyncTimeout`, and `--rsyncSSH` options
 - Retry logic with exponential backoff for failed rsync operations (`--rsyncRetries` option)
 - Graceful shutdown handling for SIGTERM and SIGINT signals
 - Hardened systemd service template (`probar.service`)

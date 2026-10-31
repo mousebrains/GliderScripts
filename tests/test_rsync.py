@@ -249,3 +249,52 @@ class TestRSyncClass:
 
         # Should have exited
         assert not rsync.is_alive()
+
+
+class TestRSyncHardening:
+    """Tests for command hardening and retrying failed syncs."""
+
+    @patch('subprocess.run')
+    def test_command_options(self, mock_run, mock_logger, rsync_args):
+        """Test timeout, non-interactive ssh, and -- before the sources."""
+        mock_run.return_value = Mock(returncode=0, stdout=b"")
+        rsync = RSync(rsync_args, mock_logger)
+        rsync.start()
+        rsync.put({'/test/b', '/test/a'})
+        rsync.stop()
+        rsync.join()
+
+        cmd = mock_run.call_args[0][0]
+        assert '--timeout' in cmd
+        rsh = cmd[cmd.index('--rsh') + 1]
+        assert 'BatchMode=yes' in rsh
+        # Sources are sorted and follow --, then the target is last
+        assert cmd[-4:] == ['--', '/test/a', '/test/b', rsync_args.rsyncTarget]
+        assert mock_run.call_args[1]['stdin'] is not None
+
+    @patch('subprocess.run')
+    @patch('time.sleep')
+    def test_failed_sources_are_retried(self, mock_sleep, mock_run, mock_logger, rsync_args):
+        """Test sources which fail every attempt are retried later, with one error logged."""
+        import threading
+        rsync_args.rsyncRetries = 1
+        rsync_args.rsyncRetryDelay = 0
+        fail = Mock(returncode=255, stdout=b"ssh: connection refused")
+        success = Mock(returncode=0, stdout=b"")
+        mock_run.side_effect = [fail, fail, success]
+
+        rsync = RSync(rsync_args, mock_logger)
+        rsync.start()
+        rsync.put({'/test/source'})
+        for _ in range(50):  # Retries happen in the background, time.sleep is patched
+            if mock_run.call_count >= 3:
+                break
+            threading.Event().wait(0.1)
+        rsync.stop()
+        rsync.join(timeout=3.0)
+
+        assert mock_run.call_count == 3
+        for call in mock_run.call_args_list:
+            assert '/test/source' in call[0][0]
+        assert mock_logger.error.call_count == 1  # Only the first failure mails
+        assert mock_logger.warning.called

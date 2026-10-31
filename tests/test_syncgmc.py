@@ -131,6 +131,49 @@ class TestMkPath:
             assert "/glider" in result or result.endswith("glider")
 
 
+class TestMkPathComponents:
+    """Tests that triggers and excludes match whole path components, taken literally."""
+
+    def setup_method(self):
+        syncGMC._trigger_pattern = None
+        syncGMC._exclude_pattern = None
+
+    def _args(self):
+        return Namespace(
+            trigger=['/archive', '/from-glider', '/gliderState.xml'],
+            exclude=['.archived-deployments']
+        )
+
+    def test_trigger_must_be_whole_component(self):
+        """Test /archive does not match /archived-deployments or /archive2."""
+        args = self._args()
+        assert syncGMC.mkPath("/s/proj/glider/archived-deployments/x", args) is None
+        assert syncGMC.mkPath("/s/proj/glider/archive2/x", args) is None
+        assert syncGMC.mkPath("/s/proj/glider/archive/x", args) == "/s/proj/glider"
+        assert syncGMC.mkPath("/s/proj/glider/archive", args) == "/s/proj/glider"
+
+    def test_trigger_is_literal(self):
+        """Test the . in gliderState.xml only matches a ."""
+        args = self._args()
+        assert syncGMC.mkPath("/s/proj/glider/gliderState.xml", args) == "/s/proj/glider"
+        assert syncGMC.mkPath("/s/proj/glider/gliderStateXxml", args) is None
+
+    def test_first_trigger_wins(self):
+        """Test a nested trigger maps to the glider directory."""
+        args = self._args()
+        assert syncGMC.mkPath("/s/proj/glider/archive/dep/from-glider/a", args) == "/s/proj/glider"
+
+    def test_exclude_must_be_whole_component(self):
+        """Test excludes only match whole path components."""
+        args = self._args()
+        assert syncGMC.mkPath("/s/proj/glider/.archived-deployments/from-glider/x", args) is None
+        assert syncGMC.mkPath("/s/proj/glider/from-glider/x.archived-deployments.txt", args) == "/s/proj/glider"
+
+    def test_none_path(self):
+        """Test the overflow event's None path is not a match."""
+        assert syncGMC.mkPath(None, self._args()) is None
+
+
 class TestInitialSync:
     """Tests for initialSync function."""
 

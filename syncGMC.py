@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#! /usr/bin/python3 -Es
 #
 # This script is designed to handle TWR's dockerserver, both legacy and SFMC with projects.
 #
@@ -25,7 +25,7 @@ import queue
 import logging
 import re
 import signal
-from typing import Optional, Set
+from typing import List, Optional, Set
 import MyLogger
 import INotify
 from RSync import RSync
@@ -34,19 +34,27 @@ from RSync import RSync
 _trigger_pattern: Optional[re.Pattern] = None
 _exclude_pattern: Optional[re.Pattern] = None
 
+def _components(names: List[str]) -> str:
+    """Regular expression matching any of names, taken literally, as a whole path component."""
+    return "(?:" + "|".join(re.escape(name.strip("/")) for name in names) + ")(?:/|$)"
+
 def _compile_patterns(args: argparse.Namespace) -> None:
-    """Compile and cache regex patterns from args."""
+    """Compile and cache regex patterns from args.
+
+    Triggers and excludes match whole path components, so /archive does not
+    match /archived-deployments. The sync path is everything before the first trigger.
+    """
     global _trigger_pattern, _exclude_pattern
     if _trigger_pattern is None:
-        _trigger_pattern = re.compile("(.*)(" + "|".join(args.trigger) + ")")
+        _trigger_pattern = re.compile("^(.*?)/" + _components(args.trigger))
     if _exclude_pattern is None and args.exclude is not None:
-        _exclude_pattern = re.compile("(" + "|".join(args.exclude) + ")")
+        _exclude_pattern = re.compile("(?:^|/)" + _components(args.exclude))
 
-def mkPath(path: str, args: argparse.Namespace) -> Optional[str]:
+def mkPath(path: Optional[str], args: argparse.Namespace) -> Optional[str]:
     """Extract the sync path from a file path if it matches trigger patterns."""
     _compile_patterns(args)
 
-    if _trigger_pattern is None:
+    if _trigger_pattern is None or path is None:
         return None
 
     a = _trigger_pattern.search(path)
@@ -73,6 +81,10 @@ def doit(args: argparse.Namespace,
             inotify.task_done()
 
             if evt.flags.IGNORED in evt.flags:
+                continue
+
+            if INotify.Flags.Q_OVERFLOW in evt.flags:  # Events were lost, so rescan everything
+                initialSync(args, rsync)
                 continue
 
             a = mkPath(evt.path, args)
@@ -170,10 +182,12 @@ if __name__ == "__main__":
 
     try:
         doit(args, logger, inotify, rsync)
+        logger.error("INotify thread exited, waiting for rsync to finish before exiting")
     except Exception:
         logger.exception("Unexpected exception, waiting for rsync to finish before exiting")
 
-    # Graceful shutdown
+    # Only get here on an error, signals exit via signal_handler
     inotify.stop()
     rsync.stop()
     rsync.join()  # Wait for rsync tasks to complete
+    sys.exit(1)  # Non-zero, so systemd knows this was a failure

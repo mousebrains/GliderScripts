@@ -162,13 +162,15 @@ touch /var/opt/sfmc-dockserver/stations/test-project/test-glider/from-glider/tes
 
 ## Hardened Installation (Recommended)
 
-For production systems, use the hardened service file:
+`syncGMC2fs2.service` is hardened with systemd sandboxing. The filesystem is
+read-only except for the log directory, there are no capabilities, and system
+calls are restricted. Use it as the template for other targets:
 
 ```bash
 # Copy hardened service
-sudo cp GliderScripts/probar.service /etc/systemd/system/syncGMC.service
+sudo cp GliderScripts/syncGMC2fs2.service /etc/systemd/system/syncGMC.service
 
-# Check security score
+# Check security score, should be about 1.6 OK
 systemd-analyze security syncGMC.service
 
 # Start service
@@ -181,6 +183,20 @@ journalctl -u syncGMC -f
 
 If you encounter permission errors, see the Troubleshooting section.
 
+### Restricting the ssh key on the target
+
+The service can't stop someone with root on the dockserver from using its ssh
+key, so limit what the key can do on the target. In the target's
+`~/.ssh/authorized_keys`:
+
+```
+from="<dockserver IP>",restrict,command="/usr/bin/rrsync -wo /data/Dockserver/gliderfmc0" ssh-ed25519 AAAA...
+```
+
+The key can then only write into that directory, so `--rsyncTarget` becomes
+relative to it, e.g. `fs2:/`. Add `IdentitiesOnly yes` to the host's entry in
+`~/.ssh/config`, so ssh doesn't offer other keys from an agent first.
+
 ## Configuration Reference
 
 ### syncGMC.py Options
@@ -188,13 +204,16 @@ If you encounter permission errors, see the Troubleshooting section.
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `dir` | Yes | - | Directories to monitor (positional) |
-| `--trigger` | Yes | - | Directory patterns that trigger sync |
+| `--trigger` | Yes | - | Directory names that trigger sync, matched as whole path components |
 | `--exclude` | No | None | Directory patterns to exclude |
 | `--delay` | No | 30 | Seconds to wait before syncing |
 | `--noInitial` | No | False | Skip initial sync on startup |
 | `--rsyncTarget` | Yes | - | Rsync destination |
 | `--rsyncCmd` | No | /usr/bin/rsync | Path to rsync |
 | `--rsyncRetries` | No | 3 | Retry attempts for failed sync |
+| `--rsyncRetryDelay` | No | 60 | Seconds before retrying sources which failed every attempt |
+| `--rsyncTimeout` | No | 600 | rsync I/O timeout in seconds |
+| `--rsyncSSH` | No | `ssh -o BatchMode=yes ...` | Remote shell command for rsync |
 | `--rsyncExclude` | No | None | Rsync exclude patterns |
 | `--rsyncDryRun` | No | False | Don't execute rsync |
 | `--rsyncchmod` | No | Do+rx,Fo+r | File permissions |
@@ -207,7 +226,7 @@ If you encounter permission errors, see the Troubleshooting section.
 
 ### Service File Options
 
-See `probar.service` for a fully documented example with security hardening.
+See `syncGMC2fs2.service` for a documented example with security hardening.
 
 ## Troubleshooting
 

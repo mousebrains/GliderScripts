@@ -1,8 +1,11 @@
-#! /usr/bin/env python3
+#! /usr/bin/python3 -Es
 #
 # This is an interface into the system's inotify mechanism
 # using Python's ctype mechanism.
 # It is based on INotify_simple as an example.
+#
+# If the kernel's event queue overflows, an Event with path None and
+# Flags.Q_OVERFLOW is queued, since events were lost, so the caller should rescan.
 #
 # Aug-2020, Pat Welch, pat@mousebrains.com
 
@@ -15,7 +18,7 @@ import os.path
 from enum import IntFlag
 import ctypes
 import ctypes.util
-from errno import EINTR
+from errno import EINTR, EINVAL, ENOENT, ENOSPC, ENOTDIR
 from io import FileIO
 from fcntl import ioctl
 from termios import FIONREAD
@@ -52,10 +55,6 @@ class Flags(IntFlag):
     ISDIR         = 0x40000000 # event occurred against dir
     ONESHOT       = 0x80000000 # only send event once
 
-    # Flags for sys_inotify_init1
-    CLOCEXEC      = os.O_CLOEXEC
-    NONBLOCK      = os.O_NONBLOCK
-
     # helper events
     CLOSE = (CLOSE_WRITE | CLOSE_NOWRITE) # close
     MOVE = (MOVED_FROM | MOVED_TO) # moves
@@ -66,17 +65,14 @@ class Flags(IntFlag):
             MOVE_SELF
             )
 
-    def __init__(self, mask:int) -> None:
-        self.raw = mask
-
 class Event:
-    def __init__(self, t:float, path:str, flags:Flags) -> None:
+    def __init__(self, t: float, path: Optional[str], flags: Flags) -> None:
         self.t = t
         self.path = path
         self.flags = flags
 
     def __repr__(self) -> str:
-        return self.path + " " + str(self.flags) + " " + str(self.t)
+        return str(self.path) + " " + str(self.flags) + " " + str(self.t)
 
 class INotify(threading.Thread):
     """Thread-safe inotify interface for monitoring filesystem events."""
@@ -86,7 +82,7 @@ class INotify(threading.Thread):
         self.name = "INotify"
         self.__logger = logger
         self.__queue: queue.Queue[Event] = queue.Queue()
-        self.__lock = threading.Lock()  # Protects watches/paths/recursive/mask dicts
+        self.__lock = threading.RLock()  # Protects watches/paths/recursive/mask dicts
         self.__stop_event = threading.Event()  # For graceful shutdown
         self.__watches: Dict[str, int] = {}
         self.__paths: Dict[int, str] = {}
@@ -96,7 +92,9 @@ class INotify(threading.Thread):
 
         try:
             libfn = ctypes.util.find_library("c")
-            self.__libc = ctypes.CDLL(libfn)
+            if libfn is None:
+                raise OSError("Unable to find the libc library")
+            self.__libc = ctypes.CDLL(libfn, use_errno=True)  # use_errno so get_errno works
             flags = ((not inheritable) * os.O_CLOEXEC) | (nonBlocking * os.O_NONBLOCK)
             self.__fp = FileIO(int(self.__callLibC("inotify_init1", flags)), mode='rb')
         except Exception:
@@ -104,20 +102,15 @@ class INotify(threading.Thread):
             raise  # Re-raise to prevent using invalid object
 
     def __callLibC(self, name: str, *args: Any) -> int:
-        try:
-            function = self.__libc[name] # Function pointer into libc
-            while True:
-                rc = function(*args)
-                if rc != -1:
-                    return rc
-                errno = ctypes.get_errno()
-                if errno == 0:
-                    return 0
-                if errno != EINTR:
-                    raise OSError(errno, os.strerror(errno))
-        except Exception as e:
-            self.__logger.exception("Error executing %s args %s", name, args)
-            raise e
+        """Call a libc function, retrying on EINTR. Raises OSError on failure."""
+        function = self.__libc[name] # Function pointer into libc
+        while True:
+            rc = function(*args)
+            if rc != -1:
+                return rc
+            errno = ctypes.get_errno()
+            if errno != EINTR:
+                raise OSError(errno, os.strerror(errno))
 
     def get(self, timeout=None) -> Event:
         return self.__queue.get(timeout=timeout)
@@ -137,16 +130,35 @@ class INotify(threading.Thread):
         with self.__lock:
             if path in self.__watches:
                 return
+            if self.__fp is None:
+                return
             try:
-                if self.__fp is None:
-                    return
                 wd = self.__callLibC("inotify_add_watch", self.__fp.fileno(), os.fsencode(path), mask)
-                self.__watches[path] = wd
-                self.__paths[wd] = path
-                self.__recursive[wd] = recursive and os.path.isdir(path)
-                self.__mask[wd] = mask
-            except Exception:
-                self.__logger.exception("Error adding a watch for %s", path) 
+            except OSError as e:
+                if e.errno in (ENOENT, ENOTDIR):  # Removed before we got to it
+                    self.__logger.debug("%s vanished before a watch was added", path)
+                elif e.errno == ENOSPC:
+                    self.__logger.error("Watch limit reached adding %s, %s, %s", path,
+                            "increase fs.inotify.max_user_watches",
+                            "until then, updates will be missed")
+                else:
+                    self.__logger.exception("Error adding a watch for %s", path)
+                return
+            if wd in self.__paths:  # Same inode via another path, so drop the old path
+                self.__watches.pop(self.__paths[wd], None)
+            self.__watches[path] = wd
+            self.__paths[wd] = path
+            self.__recursive[wd] = recursive and os.path.isdir(path)
+            self.__mask[wd] = mask
+
+    def __forget(self, wd: int) -> None:
+        """Drop our records of a watch, without telling the kernel (thread-safe)."""
+        with self.__lock:
+            path = self.__paths.pop(wd, None)
+            if path is not None and self.__watches.get(path) == wd:
+                del self.__watches[path]
+            self.__recursive.pop(wd, None)
+            self.__mask.pop(wd, None)
 
     def __rmWatch(self, path: str) -> bool:
         """Remove a watch for a path (thread-safe). Returns True if was recursive."""
@@ -162,8 +174,9 @@ class INotify(threading.Thread):
             try:
                 if self.__fp is not None:
                     self.__callLibC("inotify_rm_watch", self.__fp.fileno(), wd)
-            except Exception:
-                self.__logger.exception("Error removing a watch for %s", path)
+            except OSError as e:
+                if e.errno != EINVAL:  # EINVAL if the kernel already removed the watch
+                    self.__logger.exception("Error removing a watch for %s", path)
             return recursive
 
 
@@ -172,9 +185,11 @@ class INotify(threading.Thread):
         self.__addWatch(path, recursive, mask)
         if (not recursive) or (not os.path.isdir(path)):
             return
+        # Don't follow symbolic links below the top level directory
+        subMask = mask | Flags.DONT_FOLLOW | Flags.ONLYDIR
         for (root, dirs, files) in os.walk(path, followlinks=False):
             for item in dirs:
-                self.__addWatch(os.path.join(root, item), recursive, mask)
+                self.__addWatch(os.path.join(root, item), recursive, subMask)
 
     def rm(self, path: str) -> None:
         """Remove watch for the given path and any child watches."""
@@ -197,14 +212,20 @@ class INotify(threading.Thread):
             logger.error("Cannot start - inotify not initialized")
             return
 
-        while not self.__stop_event.is_set():
-            # Use timeout to periodically check stop_event
-            (rd, _, _) = select.select((fp,), (), (), 1.0)
-            if not rd:
-                continue  # Timeout, check stop_event
-            nAvail = ctypes.c_int()
-            ioctl(fp, FIONREAD, nAvail)
-            buffer = self.__procBuffer(buffer + fp.read(nAvail.value))
+        try:
+            while not self.__stop_event.is_set():
+                # Use timeout to periodically check stop_event
+                (rd, _, _) = select.select((fp,), (), (), 1.0)
+                if not rd:
+                    continue  # Timeout, check stop_event
+                nAvail = ctypes.c_int()
+                ioctl(fp, FIONREAD, nAvail)
+                if nAvail.value <= 0:
+                    continue
+                buffer = self.__procBuffer(buffer + (fp.read(nAvail.value) or b""))
+        except Exception:
+            logger.exception("Unexpected exception")
+            raise
 
         logger.info("Stopping")
 
@@ -217,9 +238,12 @@ class INotify(threading.Thread):
         while len(buffer) >= hdrSize:
             (wd, mask, cookie, n) = struct.unpack_from(hdrFormat, buffer[0:hdrSize])
 
-            # Check for queue overflow
+            # Queue overflow, events were lost, so tell the caller to rescan
             if mask & Flags.Q_OVERFLOW:
-                self.__logger.warning("inotify event queue overflow - some events may be lost")
+                self.__logger.warning("inotify event queue overflow - some events were lost")
+                self.__queue.put(Event(t, None, Flags(mask)))
+                buffer = buffer[(hdrSize + n):]
+                continue
 
             # Thread-safe access to lookup dicts
             with self.__lock:
@@ -230,13 +254,14 @@ class INotify(threading.Thread):
                 is_recursive = self.__recursive.get(wd, False)
                 watch_mask = self.__mask.get(wd, Flags.ALL_EVENTS)
 
+            if mask & Flags.IGNORED:  # Kernel removed this watch, e.g. directory deleted
+                self.__forget(wd)
+                buffer = buffer[(hdrSize + n):]
+                continue
+
             if n > 0:
-                name_bytes = buffer[hdrSize:(hdrSize + n)]
-                index = name_bytes.find(b'\x00')
-                if index >= 0:
-                    name_bytes = name_bytes[0:index]
-                name_str = str(name_bytes, "UTF-8")
-                path = os.path.join(path, name_str)
+                name_bytes = bytes(buffer[hdrSize:(hdrSize + n)]).split(b'\x00', 1)[0]
+                path = os.path.join(path, os.fsdecode(name_bytes))  # fsdecode handles non-UTF-8 names
 
             evt = Event(t, path, Flags(mask))
             self.__queue.put(evt)
@@ -245,15 +270,25 @@ class INotify(threading.Thread):
             if Flags.ISDIR in evt.flags:
                 if (Flags.CREATE in evt.flags) or (Flags.MOVED_TO in evt.flags):
                     if is_recursive:
-                        self.add(evt.path, True, watch_mask)
+                        self.__addNewDir(t, path, watch_mask)
                 elif (Flags.DELETE in evt.flags) or \
                         (Flags.DELETE_SELF in evt.flags) or \
                         (Flags.MOVED_FROM in evt.flags):
-                    self.rm(evt.path)
+                    self.rm(path)
 
             buffer = buffer[(hdrSize + n):]
 
         return buffer
+
+    def __addNewDir(self, t: float, path: str, mask: Flags) -> None:
+        """Watch a new directory, then queue events for anything which showed up
+        before the watches were in place, so they are not missed."""
+        self.add(path, True, mask)
+        for (root, dirs, files) in os.walk(path, followlinks=False):
+            for item in dirs:
+                self.__queue.put(Event(t, os.path.join(root, item), Flags.CREATE | Flags.ISDIR))
+            for item in files:
+                self.__queue.put(Event(t, os.path.join(root, item), Flags.CREATE))
 
 if __name__ == "__main__":
     import argparse

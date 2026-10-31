@@ -46,7 +46,7 @@ The application uses three threads:
 
 - **syncGMC.py**: Entry point, event loop, signal handling. Receives inotify events, coalesces them by waiting `--delay` seconds, then queues paths for rsync.
 - **INotify.py**: Thread-safe inotify wrapper using ctypes. Recursively watches directories, auto-adds/removes watches for new/deleted subdirectories.
-- **RSync.py**: Threaded rsync executor with exponential backoff retry logic.
+- **RSync.py**: Threaded rsync executor with backoff retry logic. Sources which fail every attempt are kept and retried every `--rsyncRetryDelay` seconds; only the first failed round in a row logs an error, which is what sends mail.
 - **MyLogger.py**: Configures rotating file handler and optional SMTP error notifications.
 
 ### Event Flow
@@ -63,7 +63,7 @@ Filesystem event → INotify thread → event queue → Main thread (coalesce) �
 
 ### Pattern Matching
 
-The `--trigger` patterns determine which paths trigger syncs. When a path like `/var/opt/sfmc-dockserver/stations/project/glider/from-glider/file.txt` matches trigger `/from-glider`, the sync path becomes `/var/opt/sfmc-dockserver/stations/project/glider` (parent of the trigger match).
+The `--trigger` patterns determine which paths trigger syncs. When a path like `/var/opt/sfmc-dockserver/stations/project/glider/from-glider/file.txt` matches trigger `/from-glider`, the sync path becomes `/var/opt/sfmc-dockserver/stations/project/glider` (parent of the trigger match). Triggers and excludes are taken literally and match whole path components, so `/archive` does not match `/archived-deployments`; the first trigger in a path wins.
 
 ## Testing Notes
 

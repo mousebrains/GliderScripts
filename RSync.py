@@ -1,6 +1,11 @@
-#! /usr/bin/env python3
+#! /usr/bin/python3 -Es
 #
 # Execute rsync in a thread with retry logic
+#
+# Each sync is tried --rsyncRetries times with a short backoff. If it still fails,
+# the sources are kept and retried every --rsyncRetryDelay seconds, merged with any
+# new sources, until they succeed. Only the first failure in a row is logged as an
+# error, so a long outage sends one mail rather than one per retry.
 #
 # Aug-2020, Pat Welch, pat@mousebrains.com
 
@@ -40,6 +45,13 @@ class RSync(threading.Thread):
                 help="arguments to rsync's --exclude option")
         grp.add_argument("--rsyncRetries", type=int, default=3, metavar="count",
                 help="Number of retry attempts for failed rsync (default: 3)")
+        grp.add_argument("--rsyncRetryDelay", type=float, default=60, metavar="seconds",
+                help="After all retries fail, how long before trying again (default: 60)")
+        grp.add_argument("--rsyncTimeout", type=int, default=600, metavar="seconds",
+                help="rsync I/O timeout, so a hung connection does not block syncing forever")
+        grp.add_argument("--rsyncSSH", type=str, metavar="command",
+                default="ssh -o BatchMode=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3",
+                help="Remote shell for rsync to use, BatchMode so it never prompts for a password")
 
     def put(self, sources: Set[str]) -> None:
         """Queue a set of source paths to sync."""
@@ -49,11 +61,12 @@ class RSync(threading.Thread):
         """Signal the thread to stop after completing current work."""
         self.__stop_event.set()
 
-    def __doit(self, sources: Set[str]) -> bool:
+    def __doit(self, sources: Set[str], nFailures: int = 0) -> bool:
         args = self.__args
         logger = self.__logger
         target = args.rsyncTarget
         max_retries = getattr(args, 'rsyncRetries', 3)
+        sortedSources = sorted(sources)
 
         cmd = [args.rsyncCmd,
                 "--archive",
@@ -61,6 +74,8 @@ class RSync(threading.Thread):
                 "--delete-excluded",
                 "--delete-missing-args",
                 "--delay-updates",
+                "--timeout", str(getattr(args, 'rsyncTimeout', 600)),
+                "--rsh", getattr(args, 'rsyncSSH', "ssh -o BatchMode=yes"),
                 "--chmod",
                 args.rsyncchmod]
 
@@ -72,9 +87,10 @@ class RSync(threading.Thread):
                 cmd.append("--exclude")
                 cmd.append(item)
 
-        cmd.extend(list(sources))
+        cmd.append("--")  # Nothing after this is an option, even if it starts with -
+        cmd.extend(sortedSources)
         cmd.append(target)
-        logger.info("cmd %s", cmd)
+        logger.debug("cmd %s", cmd)
 
         if args.rsyncDryRun:
             logger.info("Dryrun command %s", cmd)
@@ -83,15 +99,16 @@ class RSync(threading.Thread):
         # Retry loop with exponential backoff
         for attempt in range(max_retries):
             try:
-                p = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                p = subprocess.run(cmd, shell=False, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 if p.returncode == 0: # Success
+                    if nFailures:
+                        logger.info("rsync recovered after %d failed round(s)", nFailures)
                     if len(p.stdout):
-                        try:
-                            logger.info("rsynced %s to %s\n%s", sources, target, str(p.stdout, "UTF-8"))
-                        except UnicodeDecodeError:
-                            logger.info("rsynced %s to %s\n%s", sources, target, p.stdout)
+                        logger.info("rsynced %s to %s\n%s", sortedSources, target,
+                                p.stdout.decode("UTF-8", errors="replace"))
                     else:
-                        logger.info("rsynced %s to %s", sources, target)
+                        logger.info("rsynced %s to %s", sortedSources, target)
                     return True
 
                 # Non-zero return code
@@ -102,8 +119,11 @@ class RSync(threading.Thread):
                                    attempt + 1, max_retries, delay, error_msg)
                     time.sleep(delay)
                 else:
-                    logger.error("rsync failed after %d attempts: %s to %s\n%s\n%s",
-                                 max_retries, sources, target, cmd, error_msg)
+                    # Only the first failed round in a row is an error, so we don't mail every round
+                    (logger.error if nFailures == 0 else logger.warning)(
+                               "rsync failed after %d attempts, will retry in %ss: %s to %s\n%s\n%s",
+                               max_retries, getattr(args, 'rsyncRetryDelay', 60),
+                               sortedSources, target, cmd, error_msg)
 
             except OSError as e:
                 if attempt < max_retries - 1:
@@ -112,7 +132,8 @@ class RSync(threading.Thread):
                                    attempt + 1, max_retries, delay, e)
                     time.sleep(delay)
                 else:
-                    logger.error("rsync OS error after %d attempts: %s", max_retries, e)
+                    (logger.error if nFailures == 0 else logger.warning)(
+                               "rsync OS error after %d attempts: %s", max_retries, e)
 
         return False
 
@@ -129,19 +150,39 @@ class RSync(threading.Thread):
         q = self.__queue
         logger.info("Starting")
 
+        pending: Set[str] = set()  # Sources which still need to be synced
+        nFailures = 0  # Failed rounds in a row
+        nextRetry = 0.0  # When to retry pending sources if nothing new shows up
+        retryDelay = getattr(self.__args, 'rsyncRetryDelay', 60)
+
         while not self.__stop_event.is_set():
+            n = 0  # Queue items taken this round
             try:
                 # Use timeout to periodically check stop_event
-                sources = q.get(timeout=1.0)
+                pending.update(q.get(timeout=1.0))
+                n += 1
+                while True:  # Merge in anything else which is waiting
+                    pending.update(q.get_nowait())
+                    n += 1
             except queue.Empty:
-                continue
+                pass
 
-            logger.info("Sources %s", sources)
-            try:
-                self.__doit(sources)
-            except Exception:
-                logger.exception("Error executing rsync for %s", sources)
-            q.task_done()
+            if pending and (n or time.time() >= nextRetry):
+                logger.info("Sources %s", sorted(pending))
+                try:
+                    qOkay = self.__doit(pending, nFailures)
+                except Exception:
+                    logger.exception("Error executing rsync for %s", sorted(pending))
+                    qOkay = False
+                if qOkay:
+                    pending = set()
+                    nFailures = 0
+                else:
+                    nFailures += 1
+                    nextRetry = time.time() + retryDelay
+
+            for _ in range(n):  # After the attempt, so join waits for it
+                q.task_done()
 
         logger.info("Stopping")
 

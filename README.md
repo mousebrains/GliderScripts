@@ -11,7 +11,8 @@ GliderScripts monitors specified directories on an SFMC (Slocum Fleet Mission Co
 ## Features
 
 - **Real-time monitoring** using native Linux inotify (no external dependencies)
-- **Automatic retry** with exponential backoff for failed rsync operations
+- **Automatic retry** with backoff for failed rsync operations; sources which still fail are retried until they succeed, with one error mail per outage
+- **Security hardening**: systemd sandboxing, non-interactive ssh, and rsync I/O timeouts
 - **Event coalescing** to prevent excessive syncs during rapid changes
 - **Graceful shutdown** handling for SIGTERM and SIGINT
 - **Email notifications** for error conditions
@@ -32,8 +33,7 @@ GliderScripts/
 ├── INotify.py            # Native inotify interface using ctypes
 ├── RSync.py              # Threaded rsync wrapper with retry logic
 ├── MyLogger.py           # Logging configuration with file rotation
-├── syncGMC2fs2.service   # Example systemd service file
-├── probar.service        # Security-hardened service template
+├── syncGMC2fs2.service   # Security-hardened systemd service for gliderfs2
 ├── tests/                # Unit test suite
 │   ├── conftest.py       # Pytest fixtures
 │   ├── test_mylogger.py  # Logger tests
@@ -92,12 +92,15 @@ python3 syncGMC.py /var/opt/sfmc-dockserver/stations \
 | Option | Description | Default |
 |--------|-------------|---------|
 | `dir` | Directories to monitor (positional, required) | - |
-| `--trigger` | Directory patterns that trigger sync (required, repeatable) | - |
-| `--exclude` | Directory patterns to exclude (repeatable) | None |
+| `--trigger` | Directory names that trigger sync, matched as whole path components (required, repeatable) | - |
+| `--exclude` | Directory names to exclude, matched as whole path components (repeatable) | None |
 | `--delay` | Seconds to wait after event before syncing | 30 |
 | `--noInitial` | Skip initial sync on startup | False |
 | `--rsyncTarget` | Rsync destination (required) | - |
 | `--rsyncRetries` | Number of retry attempts | 3 |
+| `--rsyncRetryDelay` | Seconds before retrying sources which failed every attempt | 60 |
+| `--rsyncTimeout` | rsync I/O timeout in seconds | 600 |
+| `--rsyncSSH` | Remote shell command for rsync | `ssh -o BatchMode=yes ...` |
 | `--rsyncExclude` | Rsync exclude patterns (repeatable) | None |
 | `--rsyncDryRun` | Log commands without executing | False |
 | `--logfile` | Log file path (uses console if not set) | Console |
@@ -145,7 +148,7 @@ The script expects the SFMC dockserver structure:
 1. **Startup**: Optionally performs an initial sync of all matching directories
 2. **Monitoring**: Uses inotify to watch for file system events (create, modify, delete, move)
 3. **Coalescing**: Waits `--delay` seconds after the first event to batch changes
-4. **Syncing**: Executes rsync with automatic retry on failure
+4. **Syncing**: Executes rsync with automatic retry on failure; if the kernel's inotify queue overflows, everything is rescanned
 5. **Shutdown**: Handles SIGTERM/SIGINT gracefully, waiting for pending syncs
 
 ## Testing

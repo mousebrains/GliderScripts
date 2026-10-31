@@ -12,6 +12,8 @@
 
 [Unit]
 Description=Sync /var/opt/sfmc-dockserver/stations to gliderfs2:/data/Dockserver/gliderfmc0
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 # Type=simple # Default
@@ -21,9 +23,11 @@ SupplementaryGroups=localuser
 WorkingDirectory=/home/pat/logs
 #
 # See /home/pat/.ssh/config for where fs2 points to and which identity file it uses
+# On gliderfs2 the key is restricted via rrsync -wo to /data/Dockserver/gliderfmc0,
+# so the target path is relative to that directory
 #
 ExecStart=/home/pat/bin/syncGMC.py \
-	--rsyncTarget=fs2:/data/Dockserver/gliderfmc0 \
+	--rsyncTarget=fs2:/ \
 	--rsyncExclude=.archived-deployments \
 	--exclude=.archived-deployments \
 	--trigger=/archive \
@@ -37,6 +41,44 @@ ExecStart=/home/pat/bin/syncGMC.py \
 	/var/opt/sfmc-dockserver/stations
 RestartSec=300
 Restart=always
+#
+# Hardening, check with: systemd-analyze security syncGMC2fs2
+#
+# Filesystem: everything read-only except the log directory
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pat/logs
+PrivateTmp=yes
+PrivateMounts=yes
+PrivateDevices=yes
+# Privileges
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+# Kernel
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# Network: ssh to gliderfs2 and SMTP to localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Misc
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0022
+# Resources: no core dumps, which could contain the ssh key, and bounded usage
+LimitCORE=0
+MemoryMax=512M
+TasksMax=50
 
 [Install]
 WantedBy=multi-user.target

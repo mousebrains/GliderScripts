@@ -159,3 +159,96 @@ class TestINotifyClass:
             inotify.task_done()
         except Exception:
             pytest.skip("Event not received in time")
+
+
+def _drain(inotify, timeout=0.5):
+    """Collect events until none arrive for timeout seconds."""
+    import queue
+    events = []
+    while True:
+        try:
+            events.append(inotify.get(timeout=timeout))
+            inotify.task_done()
+        except queue.Empty:
+            return events
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason="inotify only available on Linux")
+class TestINotifyRobustness:
+    """Tests for error handling and edge cases."""
+
+    def test_libc_errors_raise(self, mock_logger):
+        """Test a failing libc call raises OSError with the real errno."""
+        import errno
+        inotify = INotify.INotify(mock_logger)
+        with pytest.raises(OSError) as e:
+            inotify._INotify__callLibC("inotify_add_watch", 9999, b"/", 1)
+        assert e.value.errno == errno.EBADF
+
+    def test_add_missing_path(self, mock_logger, temp_dir):
+        """Test watching a path which does not exist records no watch."""
+        inotify = INotify.INotify(mock_logger)
+        missing = os.path.join(temp_dir, "missing")
+        inotify.add(missing, recursive=True, mask=INotify.Flags.CREATE)
+        assert missing not in inotify._INotify__watches
+        mock_logger.exception.assert_not_called()
+
+    def test_rm_does_not_remove_prefix_siblings(self, mock_logger, temp_dir):
+        """Test removing /a/b leaves /a/b2 watched."""
+        for name in ("b", "b2"):
+            os.mkdir(os.path.join(temp_dir, name))
+        inotify = INotify.INotify(mock_logger)
+        inotify.add(temp_dir, recursive=True, mask=INotify.Flags.CREATE)
+        inotify.rm(os.path.join(temp_dir, "b"))
+        assert os.path.join(temp_dir, "b") not in inotify._INotify__watches
+        assert os.path.join(temp_dir, "b2") in inotify._INotify__watches
+
+    def test_non_utf8_filename(self, mock_logger, temp_dir):
+        """Test a non-UTF-8 filename is reported and does not kill the thread."""
+        inotify = INotify.INotify(mock_logger)
+        inotify.add(temp_dir, recursive=True, mask=INotify.Flags.CREATE)
+        inotify.start()
+        fd = os.open(os.fsencode(temp_dir) + b"/bad\xff.txt", os.O_CREAT | os.O_WRONLY)
+        os.close(fd)
+        events = _drain(inotify)
+        assert inotify.is_alive()
+        assert any("bad" in e.path for e in events)
+        inotify.stop()
+
+    def test_fast_nested_directory_creation(self, mock_logger, temp_dir):
+        """Test files created in a new directory before its watch exists are reported."""
+        inotify = INotify.INotify(mock_logger)
+        inotify.add(temp_dir, recursive=True, mask=INotify.Flags.CREATE | INotify.Flags.CLOSE_WRITE)
+        inotify.start()
+        deep = os.path.join(temp_dir, "new", "deep", "deeper")
+        os.makedirs(deep)
+        with open(os.path.join(deep, "f.txt"), "w") as fp:
+            fp.write("x")
+        events = _drain(inotify)
+        assert os.path.join(deep, "f.txt") in [e.path for e in events]
+        assert deep in inotify._INotify__watches
+        inotify.stop()
+
+    def test_deleted_directory_forgotten(self, mock_logger, temp_dir):
+        """Test watches for a deleted tree are dropped."""
+        import shutil
+        sub = os.path.join(temp_dir, "sub", "subsub")
+        os.makedirs(sub)
+        inotify = INotify.INotify(mock_logger)
+        inotify.add(temp_dir, recursive=True, mask=INotify.Flags.CREATE | INotify.Flags.DELETE)
+        inotify.start()
+        shutil.rmtree(os.path.join(temp_dir, "sub"))
+        _drain(inotify)
+        assert not any(k.startswith(os.path.join(temp_dir, "sub")) for k in inotify._INotify__watches)
+        mock_logger.exception.assert_not_called()
+        inotify.stop()
+
+    def test_overflow_queues_event(self, mock_logger):
+        """Test a queue overflow is passed on as an Event with path None."""
+        import struct
+        inotify = INotify.INotify(mock_logger)
+        raw = bytearray(struct.pack("iIII", -1, INotify.Flags.Q_OVERFLOW, 0, 0))
+        assert inotify._INotify__procBuffer(raw) == bytearray()
+        event = inotify.get(timeout=1.0)
+        assert event.path is None
+        assert INotify.Flags.Q_OVERFLOW in event.flags
